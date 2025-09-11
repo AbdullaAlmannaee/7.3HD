@@ -4,18 +4,17 @@ pipeline {
   tools { nodejs 'NodeJS' }
 
   environment {
-    REGISTRY    = "${env.REGISTRY}"
-    IMAGE_NAME  = "${env.IMAGE_NAME}"
+    REGISTRY    = "${env.REGISTRY ?: ''}"        // avoid "null"
+    IMAGE_NAME  = "${env.IMAGE_NAME ?: ''}"      // avoid "null"
     IMAGE_TAG   = "${env.IMAGE_TAG ?: 'latest'}"
-    SONAR_HOST  = "${env.SONAR_HOST}"            // e.g. http://sonarqube:9000
-    SONAR_TOKEN = credentials('SONAR_TOKEN1')    // <-- your Sonar cred ID
-    DEPLOY_SSH  = "${env.DEPLOY_SSH}"
+    SONAR_HOST  = "${env.SONAR_HOST ?: ''}"
+    SONAR_TOKEN = credentials('SONAR_TOKEN1')
+    DEPLOY_SSH  = "${env.DEPLOY_SSH ?: ''}"
     DEPLOY_PATH = "${env.DEPLOY_PATH ?: '/var/www/app'}"
-    HEALTH_URL  = "${env.HEALTH_URL}"
+    HEALTH_URL  = "${env.HEALTH_URL ?: ''}"
   }
 
   stages {
-
     stage('Checkout') { steps { checkout scm } }
 
     // 1) BUILD
@@ -27,11 +26,14 @@ pipeline {
           if [ -f package-lock.json ]; then npm ci; else npm install; fi
           npm run build --if-present
 
-          if [ -f Dockerfile ] && [ -n "$REGISTRY" ] && [ -n "$IMAGE_NAME" ]; then
+          # Only build Docker image if Docker exists AND Dockerfile present AND registry/name provided
+          if command -v docker >/dev/null 2>&1 && [ -f Dockerfile ] && [ -n "$REGISTRY" ] && [ -n "$IMAGE_NAME" ]; then
             IMAGE="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+            echo "Building Docker image $IMAGE"
             docker build -t "$IMAGE" .
             echo "$IMAGE" > image.txt
           else
+            echo "Skipping Docker image build (docker or envs missing). Archiving artifacts instead."
             mkdir -p artifacts
             [ -d dist  ] && tar -czf artifacts/dist.tgz  dist
             [ -d build ] && tar -czf artifacts/build.tgz build
@@ -62,30 +64,20 @@ pipeline {
           echo "Running SonarQube scan..."
           if ! command -v sonar-scanner >/dev/null 2>&1; then
             npm i -D sonar-scanner
-            npx sonar-scanner \
-              -Dsonar.host.url="$SONAR_HOST" \
-              -Dsonar.login="$SONAR_TOKEN" || true
+            npx sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
           else
-            sonar-scanner \
-              -Dsonar.host.url="$SONAR_HOST" \
-              -Dsonar.login="$SONAR_TOKEN" || true
+            sonar-scanner   -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
           fi
         '''
       }
     }
 
-    // 4) SECURITY (no Snyk; keep stage using npm audit)
+    // 4) SECURITY (keep stage; no Snyk)
     stage('Security') {
-      steps {
-        sh '''
-          set -e
-          echo "Running npm audit (high+)"
-          npm audit --audit-level=high || true
-        '''
-      }
+      steps { sh 'npm audit --audit-level=high || true' }
     }
 
-    // 5) DEPLOY
+    // 5) DEPLOY (test/staging) — will still run only if configured
     stage('Deploy') {
       when {
         anyOf {
@@ -97,6 +89,7 @@ pipeline {
         sh '''
           set -e
           if [ -f docker-compose.yml ]; then
+            command -v docker >/dev/null 2>&1 || { echo "docker not found; skipping compose"; exit 0; }
             docker compose down || true
             docker compose up -d --build
           elif [ -n "$DEPLOY_SSH" ]; then
