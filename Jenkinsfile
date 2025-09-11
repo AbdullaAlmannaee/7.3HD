@@ -69,39 +69,23 @@ pipeline {
     }
 
     stage('Code Quality') {
-      steps {
-        sh '''
-          set -e
-          if [ ! -f sonar-project.properties ] || [ -z "$SONAR_HOST" ]; then
-            echo "Sonar not configured -> skipping"
-            exit 0
-          fi
-
-          echo "Running SonarQube scan against $SONAR_HOST ..."
-          if ! command -v sonar-scanner >/dev/null 2>&1; then
-            npm i -D sonar-scanner
-            npx sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN"
-          else
-            sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN"
-          fi
-
-          # Optional lightweight wait (no plugin): try 3x to fetch Quality Gate status via API if SONAR_PROJECT_KEY exists
-          if grep -q '^sonar.projectKey=' sonar-project.properties; then
-            KEY="$(grep '^sonar.projectKey=' sonar-project.properties | cut -d= -f2-)"
-            for i in 1 2 3; do
-              sleep 5
-              STATUS=$(curl -sf -u "$SONAR_TOKEN:" "$SONAR_HOST/api/qualitygates/project_status?projectKey=$KEY" | sed -n 's/.*"status":"\\([^"]*\\)".*/\\1/p' || true)
-              echo "Quality Gate status: ${STATUS:-unknown}"
-              [ "$STATUS" = "OK" ] && exit 0
-            done
-            echo "Quality Gate not OK (or unknown) after retries -> failing"
-            exit 1
-          else
-            echo "No sonar.projectKey -> cannot check gate; continuing"
-          fi
-        '''
-      }
-    }
+  steps {
+    sh '''
+      set -e
+      if [ -z "$SONAR_HOST" ]; then echo "No SONAR_HOST -> skip"; exit 0; fi
+      if ! command -v sonar-scanner >/dev/null 2>&1; then npm i -D sonar-scanner; SC="npx sonar-scanner"; else SC="sonar-scanner"; fi
+      $SC \
+        -Dsonar.host.url="$SONAR_HOST" \
+        -Dsonar.login="$SONAR_TOKEN" \
+        -Dsonar.projectKey=AbdullaAlmannaee_7.3HD \
+        -Dsonar.organization=abdullaalmannaee-1 \
+        -Dsonar.projectName=7.3HD \
+        -Dsonar.projectVersion=${BUILD_NUMBER} \
+        -Dsonar.sources=. \
+        -Dsonar.sourceEncoding=UTF-8
+    '''
+  }
+}
 
     stage('Security') {
       steps {
