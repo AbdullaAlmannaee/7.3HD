@@ -1,0 +1,43 @@
+name: Build
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  sonarqube:
+    name: SonarQube
+    runs-on: macos-latest   # you can switch to ubuntu-latest if you prefer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # better analysis (full history)
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Test (with coverage if configured)
+        run: |
+          if npm run | grep -qE "^ *test"; then
+            npm test -- --coverage || npm test --if-present
+          else
+            echo "No test script; skipping"
+          fi
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   # you've already added this
+        with:
+          args: >
+            -Dsonar.projectKey=AbdullaAlmannaee_7.3HD
+            -Dsonar.organization=abdullaalmannaee-1
+            -Dsonar.sources=.
+            -Dsonar.sourceEncoding=UTF-8
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
