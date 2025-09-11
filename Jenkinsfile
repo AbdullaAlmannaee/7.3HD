@@ -1,13 +1,13 @@
 pipeline {
   agent any
 
+  tools { nodejs 'node18' } // from Manage Jenkins → Tools
+
   environment {
     REGISTRY = "docker.io"
     IMAGE    = "abdullaalmannaee/hd73-app"
     NODE_ENV = "test"
-    // Sonar
-    SONARQUBE_ENV = "sonar" // Jenkins global config name
-    // Release version (git short sha + build number)
+    SONARQUBE_ENV = "sonar" // Manage Jenkins → System → SonarQube servers
     VERSION = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7)}"
   }
 
@@ -32,7 +32,7 @@ pipeline {
       steps {
         sh '''
           echo "==> Install deps"
-          npm ci
+          npm ci || npm install
           echo "==> Build Docker image"
           docker build -t $IMAGE:commit-$VERSION .
         '''
@@ -48,10 +48,7 @@ pipeline {
       }
       post {
         always {
-          junit allowEmptyResults: true, testResults: '**/junit*.xml, **/jest-junit*.xml'
-        }
-        unsuccessful {
-          echo "Tests failed — keeping going for demo, but ideally failFast."
+          junit allowEmptyResults: true, testResults: '**/junit*.xml, **/jest-junit*.xml, reports/junit/*.xml'
         }
       }
     }
@@ -62,17 +59,14 @@ pipeline {
           withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
             sh '''
               echo "==> Sonar scan"
-              ./node_modules/.bin/sonar-scanner 2>/dev/null || sonar-scanner
+              ./node_modules/.bin/sonar-scanner -Dsonar.login=$SONAR_TOKEN 2>/dev/null \
+              || sonar-scanner -Dsonar.login=$SONAR_TOKEN
             '''
           }
         }
       }
-      post {
-        always {
-          // Wait for quality gate (optional; uncomment to strictly gate)
-          // timeout(time: 3, unit: 'MINUTES') { waitForQualityGate abortPipeline: false }
-        }
-      }
+      // To hard-gate on the quality gate, uncomment:
+      // post { success { timeout(time: 3, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } } }
     }
 
     stage('Security (Deps & Image)') {
@@ -95,19 +89,22 @@ pipeline {
 
     stage('Deploy (Staging)') {
       steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PWD')]) {
+          sh '''
+            echo "==> Docker login & push staging tag"
+            echo "$DOCKERHUB_PWD" | docker login -u "$DOCKERHUB_USER" --password-stdin
+            docker tag $IMAGE:commit-$VERSION $IMAGE:staging
+            docker push $IMAGE:staging
+          '''
+        }
         sh '''
-          echo "==> Tag & push staging image"
-          echo "$DOCKERHUB_PWD" | docker login -u "$DOCKERHUB_USER" --password-stdin
-          docker tag $IMAGE:commit-$VERSION $IMAGE:staging
-          docker push $IMAGE:staging
-
           echo "==> Bring up staging with docker-compose"
           docker compose -f docker-compose.yml down || true
           DOCKER_IMAGE=$IMAGE:staging docker compose -f docker-compose.yml up -d --pull always
 
-          echo "==> Smoke check"
-          sleep 5
-          curl -fsS http://localhost:3000/health || curl -fsS http://localhost:3000 || true
+          echo "==> Smoke/health check"
+          bash ./wait-for-health.sh http://localhost:3000/health || \
+          (sleep 5 && curl -fsS http://localhost:3000/health)
         '''
       }
     }
@@ -115,12 +112,15 @@ pipeline {
     stage('Release (Production)') {
       when { branch 'main' }
       steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PWD')]) {
+          sh '''
+            echo "==> Tag & push prod image"
+            echo "$DOCKERHUB_PWD" | docker login -u "$DOCKERHUB_USER" --password-stdin
+            docker tag $IMAGE:commit-$VERSION $IMAGE:latest
+            docker push $IMAGE:latest
+          '''
+        }
         sh '''
-          echo "==> Tag & push prod image"
-          echo "$DOCKERHUB_PWD" | docker login -u "$DOCKERHUB_USER" --password-stdin
-          docker tag $IMAGE:commit-$VERSION $IMAGE:latest
-          docker push $IMAGE:latest
-
           echo "==> Git tag"
           git config user.email "ci@jenkins.local"
           git config user.name "Jenkins CI"
@@ -133,7 +133,7 @@ pipeline {
     stage('Monitoring & Alerting') {
       steps {
         sh '''
-          echo "==> Basic uptime/latency check"
+          echo "==> Basic latency check"
           START=$(date +%s%3N)
           curl -fsS http://localhost:3000/health || curl -fsS http://localhost:3000
           END=$(date +%s%3N)
@@ -143,7 +143,6 @@ pipeline {
       post {
         always {
           archiveArtifacts artifacts: 'monitoring-metrics.txt', onlyIfSuccessful: false
-          echo "Hook here: send Slack/Email if latency > threshold or curl fails."
         }
       }
     }
