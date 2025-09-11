@@ -63,18 +63,26 @@ pipeline {
       }
     }
 
-    // Code Quality (SonarQube)
+    // 3) CODE QUALITY (always enters stage; self-skip with a message)
     stage('Code Quality') {
-      when { expression { fileExists('sonar-project.properties') && env.SONAR_HOST?.trim() } }
       steps {
         sh '''
           set -e
-          echo "Running SonarQube scan..."
+          if [ ! -f sonar-project.properties ]; then
+            echo "Sonar: sonar-project.properties not found -> skipping (success)."
+            exit 0
+          fi
+          if [ -z "$SONAR_HOST" ]; then
+            echo "Sonar: SONAR_HOST not set -> skipping (success)."
+            exit 0
+          fi
+
+          echo "Running SonarQube scan against $SONAR_HOST ..."
           if ! command -v sonar-scanner >/dev/null 2>&1; then
             npm i -D sonar-scanner
             npx sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
           else
-            sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
+            sonar-scanner  -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
           fi
         '''
       }
@@ -125,22 +133,26 @@ pipeline {
       }
     }
 
-    // Monitoring
+    // 7) MONITORING (always enters stage; quick, non-blocking health check)
     stage('Monitoring') {
-      when { expression { return env.HEALTH_URL?.trim() } }
       steps {
         sh '''
           set -e
-          echo "Health check: $HEALTH_URL"
-          if curl -fsS "$HEALTH_URL" >/dev/null; then
-            echo "Health OK"
+          if [ -z "$HEALTH_URL" ]; then
+            echo "Monitoring: HEALTH_URL not set -> skipping (success)."
+            exit 0
+          fi
+
+          echo "Pinging $HEALTH_URL ..."
+          # --max-time prevents long hangs that keep Blue Ocean blue forever
+          if curl -fsS --max-time 10 "$HEALTH_URL" >/dev/null; then
+            echo "Monitoring: Health OK"
           else
-            echo "Health check failed (non-blocking)"; exit 0
+            echo "Monitoring: Health check failed (non-blocking)"; exit 0
           fi
         '''
       }
     }
-  }
 
   post {
     success { echo '✅ Pipeline succeeded.' }
