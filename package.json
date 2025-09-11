@@ -1,11 +1,14 @@
 {
-  "name": "sit223-demo-app",
-  "version": "1.0.0",
   "scripts": {
     "start": "node server.js",
-    "build": "echo \"(optional) build step here\"",
-    "test": "npm run test:unit",
-    "test:unit": "node ./test/sample.test.js"
+    "test": "jest --ci --reporters=default --reporters=jest-junit",
+    "lint": "eslint .",
+    "sonar": "sonar-scanner"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "jest-junit": "^16.0.0",
+    "eslint": "^9.0.0",
+    "sonarqube-scanner": "^2.8.1"
+  }
 }
