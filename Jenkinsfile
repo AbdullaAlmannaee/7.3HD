@@ -9,7 +9,7 @@ pipeline {
     IMAGE_NAME  = "${env.IMAGE_NAME}"         // e.g. myapp
     IMAGE_TAG   = "${env.IMAGE_TAG ?: 'latest'}"
     SONAR_HOST  = "${env.SONAR_HOST}"         // e.g. http://sonarqube:9000
-    SONAR_TOKEN = credentials('SONAR_TOKEN')  // Jenkins cred id (token)
+    SONAR_TOKEN = credentials('SONAR_TOKEN1') // <-- updated credential ID
     SNYK_TOKEN  = credentials('SNYK_TOKEN')   // Jenkins cred id (token)
     DEPLOY_SSH  = "${env.DEPLOY_SSH}"         // e.g. user@staging
     DEPLOY_PATH = "${env.DEPLOY_PATH ?: '/var/www/app'}"
