@@ -1,7 +1,8 @@
 pipeline {
   agent any
 
-  tools { nodejs 'node18' } // from Manage Jenkins → Tools
+  tools { nodejs 'NodeJS' }
+
 
   environment {
     REGISTRY = "docker.io"
