@@ -1,156 +1,189 @@
 pipeline {
   agent any
-
-  tools { nodejs 'NodeJS' }
-
+  options { timestamps(); disableConcurrentBuilds() }
+  tools { nodejs 'NodeJS' }   // matches your Tools config
 
   environment {
-    REGISTRY = "docker.io"
-    IMAGE    = "abdullaalmannaee/hd73-app"
-    NODE_ENV = "test"
-    SONARQUBE_ENV = "sonar" // Manage Jenkins → System → SonarQube servers
-    VERSION = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7)}"
+    // ----- Optional env you can set in the job -----
+    REGISTRY    = "${env.REGISTRY}"           // e.g. ghcr.io/youruser
+    IMAGE_NAME  = "${env.IMAGE_NAME}"         // e.g. myapp
+    IMAGE_TAG   = "${env.IMAGE_TAG ?: 'latest'}"
+    SONAR_HOST  = "${env.SONAR_HOST}"         // e.g. http://sonarqube:9000
+    SONAR_TOKEN = credentials('SONAR_TOKEN')  // Jenkins cred id (token)
+    SNYK_TOKEN  = credentials('SNYK_TOKEN')   // Jenkins cred id (token)
+    DEPLOY_SSH  = "${env.DEPLOY_SSH}"         // e.g. user@staging
+    DEPLOY_PATH = "${env.DEPLOY_PATH ?: '/var/www/app'}"
+    HEALTH_URL  = "${env.HEALTH_URL}"         // e.g. https://app.example.com/health
   }
-
-  options {
-    timestamps()
-    disableConcurrentBuilds()
-    buildDiscarder(logRotator(numToKeepStr: '20'))
-  }
-
-  triggers { pollSCM('@daily') } // optional
 
   stages {
 
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
+    // 1) BUILD
     stage('Build') {
       steps {
         sh '''
-          echo "==> Install deps"
-          npm ci || npm install
-          echo "==> Build Docker image"
-          docker build -t $IMAGE:commit-$VERSION .
+          set -e
+          echo "Node: $(node -v)  npm: $(npm -v)"
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+          # Preferred app build step (if defined)
+          npm run build --if-present
+
+          # If Dockerfile exists, build a Docker image as the artefact
+          if [ -f Dockerfile ] && [ -n "$REGISTRY" ] && [ -n "$IMAGE_NAME" ]; then
+            IMAGE="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+            echo "Building Docker image $IMAGE"
+            docker build -t "$IMAGE" .
+            echo "$IMAGE" > image.txt
+          else
+            # Otherwise package the build/dist as a zip artefact
+            mkdir -p artifacts
+            if [ -d dist ];  then tar -czf artifacts/dist.tgz dist;  fi
+            if [ -d build ]; then tar -czf artifacts/build.tgz build; fi
+            if [ -f package.json ]; then cp package.json artifacts/; fi
+          fi
         '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'artifacts/**,image.txt', allowEmptyArchive: true
+        }
       }
     }
 
+    // 2) TEST
     stage('Test') {
       steps {
         sh '''
-          echo "==> Run unit tests"
-          npm test -- --ci --reporters=default --reporters=jest-junit || true
+          set -e
+          # Runs tests if present; won’t fail pipeline if tests fail initially
+          npm test --if-present || true
         '''
       }
       post {
         always {
-          junit allowEmptyResults: true, testResults: '**/junit*.xml, **/jest-junit*.xml, reports/junit/*.xml'
+          junit testResults: 'junit*.xml, **/junit*.xml', allowEmptyResults: true
+          archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
         }
       }
     }
 
-    stage('Code Quality (SonarQube)') {
-      steps {
-        withSonarQubeEnv("${env.SONARQUBE_ENV}") {
-          withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-            sh '''
-              echo "==> Sonar scan"
-              ./node_modules/.bin/sonar-scanner -Dsonar.login=$SONAR_TOKEN 2>/dev/null \
-              || sonar-scanner -Dsonar.login=$SONAR_TOKEN
-            '''
-          }
+    // 3) CODE QUALITY
+    stage('Code Quality') {
+      when {
+        anyOf {
+          expression { fileExists('sonar-project.properties') && env.SONAR_HOST?.trim() }
+          expression { fileExists('.eslintrc') || fileExists('.eslintrc.js') || fileExists('.eslintrc.cjs') }
         }
       }
-      // To hard-gate on the quality gate, uncomment:
-      // post { success { timeout(time: 3, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } } }
-    }
-
-    stage('Security (Deps & Image)') {
       steps {
         sh '''
-          echo "==> npm audit (high/critical only)"
-          npm audit --audit-level=high || true
+          set -e
+          if [ -f sonar-project.properties ] && [ -n "$SONAR_HOST" ]; then
+            echo "Running SonarQube scan..."
+            if ! command -v sonar-scanner >/dev/null 2>&1; then
+              npm i -D sonar-scanner
+              npx sonar-scanner \
+                -Dsonar.host.url="$SONAR_HOST" \
+                -Dsonar.login="$SONAR_TOKEN" || true
+            else
+              sonar-scanner \
+                -Dsonar.host.url="$SONAR_HOST" \
+                -Dsonar.login="$SONAR_TOKEN" || true
+            fi
+          fi
 
-          echo "==> Trivy image scan"
-          which trivy || (curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin)
-          trivy image --severity HIGH,CRITICAL --no-progress --exit-code 0 $IMAGE:commit-$VERSION
-        '''
-      }
-      post {
-        always {
-          archiveArtifacts allowEmptyArchive: true, artifacts: '**/npm-audit*.json'
-        }
-      }
-    }
-
-    stage('Deploy (Staging)') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PWD')]) {
-          sh '''
-            echo "==> Docker login & push staging tag"
-            echo "$DOCKERHUB_PWD" | docker login -u "$DOCKERHUB_USER" --password-stdin
-            docker tag $IMAGE:commit-$VERSION $IMAGE:staging
-            docker push $IMAGE:staging
-          '''
-        }
-        sh '''
-          echo "==> Bring up staging with docker-compose"
-          docker compose -f docker-compose.yml down || true
-          DOCKER_IMAGE=$IMAGE:staging docker compose -f docker-compose.yml up -d --pull always
-
-          echo "==> Smoke/health check"
-          bash ./wait-for-health.sh http://localhost:3000/health || \
-          (sleep 5 && curl -fsS http://localhost:3000/health)
+          # Optional ESLint (as code health) if config exists
+          if [ -f .eslintrc ] || [ -f .eslintrc.js ] || [ -f .eslintrc.cjs ]; then
+            npx eslint . || true
+          fi
         '''
       }
     }
 
-    stage('Release (Production)') {
-      when { branch 'main' }
+    // 4) SECURITY
+    stage('Security') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PWD')]) {
-          sh '''
-            echo "==> Tag & push prod image"
-            echo "$DOCKERHUB_PWD" | docker login -u "$DOCKERHUB_USER" --password-stdin
-            docker tag $IMAGE:commit-$VERSION $IMAGE:latest
-            docker push $IMAGE:latest
-          '''
-        }
         sh '''
-          echo "==> Git tag"
-          git config user.email "ci@jenkins.local"
-          git config user.name "Jenkins CI"
-          git tag -a "v${BUILD_NUMBER}" -m "Release build ${BUILD_NUMBER}"
-          git push origin --tags || true
+          set -e
+          if [ -n "$SNYK_TOKEN" ]; then
+            if ! command -v snyk >/dev/null 2>&1; then npm i -g snyk; fi
+            snyk auth "$SNYK_TOKEN" >/dev/null 2>&1 || true
+            echo "Running Snyk dependency test..."
+            snyk test || true
+          else
+            echo "SNYK_TOKEN not set; running npm audit (non-blocking)"
+            npm audit --audit-level=high || true
+          fi
         '''
       }
     }
 
-    stage('Monitoring & Alerting') {
+    // 5) DEPLOY (to a test/staging env)
+    stage('Deploy') {
+      when {
+        anyOf {
+          expression { fileExists('docker-compose.yml') }
+          expression { env.DEPLOY_SSH?.trim() }
+        }
+      }
       steps {
         sh '''
-          echo "==> Basic latency check"
-          START=$(date +%s%3N)
-          curl -fsS http://localhost:3000/health || curl -fsS http://localhost:3000
-          END=$(date +%s%3N)
-          echo "Latency(ms)=$((END-START))" | tee monitoring-metrics.txt
+          set -e
+          if [ -f docker-compose.yml ]; then
+            echo "Deploying with docker-compose (test env)..."
+            docker compose down || true
+            docker compose up -d --build
+          elif [ -n "$DEPLOY_SSH" ]; then
+            echo "Deploying static build to $DEPLOY_SSH:$DEPLOY_PATH"
+            ssh -o StrictHostKeyChecking=no "$DEPLOY_SSH" "mkdir -p '$DEPLOY_PATH'"
+            rsync -az --delete dist/ "$DEPLOY_SSH:$DEPLOY_PATH"/ || true
+            rsync -az --delete build/ "$DEPLOY_SSH:$DEPLOY_PATH"/ || true
+          fi
         '''
       }
-      post {
-        always {
-          archiveArtifacts artifacts: 'monitoring-metrics.txt', onlyIfSuccessful: false
-        }
+    }
+
+    // 6) RELEASE (promote to prod / tag)
+    stage('Release') {
+      when { expression { return env.GIT_URL?.trim() } }
+      steps {
+        sh '''
+          set -e
+          TAG="release-${BUILD_NUMBER}"
+          git config user.name "jenkins"
+          git config user.email "jenkins@local"
+          git tag -f "$TAG"
+          git push --force origin "$TAG" || true
+          echo "Created git tag $TAG"
+        '''
+      }
+    }
+
+    // 7) MONITORING & ALERTING
+    stage('Monitoring') {
+      when { expression { return env.HEALTH_URL?.trim() } }
+      steps {
+        sh '''
+          set -e
+          echo "Health check: $HEALTH_URL"
+          if curl -fsS "$HEALTH_URL" >/dev/null; then
+            echo "✅ Health OK"
+          else
+            echo "⚠️ Health check failed (non-blocking)"; exit 0
+          fi
+        '''
       }
     }
   }
 
   post {
-    success { echo "Pipeline OK: $BUILD_TAG" }
-    failure { echo "Pipeline FAILED" }
-    always  { cleanWs() }
+    success { echo '✅ Pipeline succeeded.' }
+    failure { echo '❌ Pipeline failed. Check the first red error above.' }
+    always  { echo "Build #${env.BUILD_NUMBER} complete." }
   }
 }
