@@ -24,7 +24,6 @@ pipeline {
     stage('Checkout') {
       steps {
         checkout scm
-        sh 'git log -1 --pretty=oneline || true'
       }
     }
 
