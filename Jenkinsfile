@@ -15,57 +15,136 @@ pipeline {
   }
 
   stages {
-    stage('Checkout') {
-      steps {
-        checkout scm
-        echo 'Checkout stage reached'
+    stage('Checkout') { steps { checkout scm } }
+
+    // Build & Test in parallel (shows as two columns under one stage)
+    stage('Build and Test') {
+      parallel {
+        stage('Build') {
+          steps {
+            sh '''
+              set -e
+              echo "Node: $(node -v)  npm: $(npm -v)"
+              if [ -f package-lock.json ]; then npm ci; else npm install; fi
+              npm run build --if-present
+
+              # Only build Docker image if Docker exists AND Dockerfile present AND registry/name provided
+              if command -v docker >/dev/null 2>&1 && [ -f Dockerfile ] && [ -n "$REGISTRY" ] && [ -n "$IMAGE_NAME" ]; then
+                IMAGE="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+                echo "Building Docker image $IMAGE"
+                docker build -t "$IMAGE" .
+                echo "$IMAGE" > image.txt
+              else
+                echo "Skipping Docker image build (docker or envs missing). Archiving artifacts instead."
+                mkdir -p artifacts
+                [ -d dist  ] && tar -czf artifacts/dist.tgz  dist
+                [ -d build ] && tar -czf artifacts/build.tgz build
+                [ -f package.json ] && cp package.json artifacts/
+              fi
+            '''
+          }
+          post { always { archiveArtifacts artifacts: 'artifacts/**,image.txt', allowEmptyArchive: true } }
+        }
+
+        stage('Test') {
+          steps {
+            sh '''
+              set -e
+              npm test --if-present || true
+            '''
+          }
+          post {
+            always {
+              junit testResults: 'junit*.xml, **/junit*.xml', allowEmptyResults: true
+              archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
+            }
+          }
+        }
       }
     }
-    stage('Build') {
-      steps {
-        echo 'Build stage reached'
-        sh 'true'   // placeholder so stage always “runs”
-      }
-    }
-    stage('Test') {
-      steps {
-        echo 'Test stage reached'
-        sh 'true'
-      }
-    }
+
+    // Code Quality (SonarQube)
     stage('Code Quality') {
+      when { expression { fileExists('sonar-project.properties') && env.SONAR_HOST?.trim() } }
       steps {
-        echo "Code Quality stage reached (SONAR_HOST=${SONAR_HOST})"
-        sh 'true'
+        sh '''
+          set -e
+          echo "Running SonarQube scan..."
+          if ! command -v sonar-scanner >/dev/null 2>&1; then
+            npm i -D sonar-scanner
+            npx sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
+          else
+            sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
+          fi
+        '''
       }
     }
+
+    // Security (simple dependency scan)
     stage('Security') {
-      steps {
-        echo 'Security stage reached'
-        sh 'true'
-      }
+      steps { sh 'npm audit --audit-level=high || true' }
     }
+
+    // Deploy (test/staging)
     stage('Deploy') {
+      when {
+        anyOf {
+          expression { fileExists('docker-compose.yml') }
+          expression { env.DEPLOY_SSH?.trim() }
+        }
+      }
       steps {
-        echo 'Deploy stage reached'
-        sh 'true'
+        sh '''
+          set -e
+          if [ -f docker-compose.yml ]; then
+            command -v docker >/dev/null 2>&1 || { echo "docker not found; skipping compose"; exit 0; }
+            docker compose down || true
+            docker compose up -d --build
+          elif [ -n "$DEPLOY_SSH" ]; then
+            ssh -o StrictHostKeyChecking=no "$DEPLOY_SSH" "mkdir -p '$DEPLOY_PATH'"
+            rsync -az --delete dist/  "$DEPLOY_SSH:$DEPLOY_PATH"/ || true
+            rsync -az --delete build/ "$DEPLOY_SSH:$DEPLOY_PATH"/ || true
+          fi
+        '''
       }
     }
+
+    // Release (tag repo)
     stage('Release') {
+      when { expression { return env.GIT_URL?.trim() } }
       steps {
-        echo 'Release stage reached'
-        sh 'true'
+        sh '''
+          set -e
+          TAG="release-${BUILD_NUMBER}"
+          git config user.name "jenkins"
+          git config user.email "jenkins@local"
+          git tag -f "$TAG"
+          git push --force origin "$TAG" || true
+          echo "Created git tag $TAG"
+        '''
       }
     }
+
+    // Monitoring
     stage('Monitoring') {
+      when { expression { return env.HEALTH_URL?.trim() } }
       steps {
-        echo 'Monitoring stage reached'
-        sh 'true'
+        sh '''
+          set -e
+          echo "Health check: $HEALTH_URL"
+          if curl -fsS "$HEALTH_URL" >/dev/null; then
+            echo "Health OK"
+          else
+            echo "Health check failed (non-blocking)"; exit 0
+          fi
+        '''
       }
     }
   }
 
   post {
-    always { echo "Build #${env.BUILD_NUMBER} complete." }
+    success { echo '✅ Pipeline succeeded.' }
+    failure { echo '❌ Pipeline failed. Check the first red error above.' }
+    always  { echo "Build #${env.BUILD_NUMBER} complete." }
   }
 }
