@@ -17,53 +17,42 @@ pipeline {
   stages {
     stage('Checkout') { steps { checkout scm } }
 
-    // Build & Test in parallel (shows as two columns under one stage)
-    stage('Build and Test') {
-      parallel {
-        stage('Build') {
-          steps {
-            sh '''
-              set -e
-              echo "Node: $(node -v)  npm: $(npm -v)"
-              if [ -f package-lock.json ]; then npm ci; else npm install; fi
-              npm run build --if-present
+    stage('Build') {
+      steps {
+        sh '''
+          set -e
+          echo "Node: $(node -v)  npm: $(npm -v)"
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build --if-present
 
-              # Only build Docker image if Docker exists AND Dockerfile present AND registry/name provided
-              if command -v docker >/dev/null 2>&1 && [ -f Dockerfile ] && [ -n "$REGISTRY" ] && [ -n "$IMAGE_NAME" ]; then
-                IMAGE="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
-                echo "Building Docker image $IMAGE"
-                docker build -t "$IMAGE" .
-                echo "$IMAGE" > image.txt
-              else
-                echo "Skipping Docker image build (docker or envs missing). Archiving artifacts instead."
-                mkdir -p artifacts
-                [ -d dist  ] && tar -czf artifacts/dist.tgz  dist
-                [ -d build ] && tar -czf artifacts/build.tgz build
-                [ -f package.json ] && cp package.json artifacts/
-              fi
-            '''
-          }
-          post { always { archiveArtifacts artifacts: 'artifacts/**,image.txt', allowEmptyArchive: true } }
-        }
+          if command -v docker >/dev/null 2>&1 && [ -f Dockerfile ] && [ -n "$REGISTRY" ] && [ -n "$IMAGE_NAME" ]; then
+            IMAGE="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+            echo "Building Docker image $IMAGE"
+            docker build -t "$IMAGE" .
+            echo "$IMAGE" > image.txt
+          else
+            echo "Skipping Docker image build (docker/envs missing). Archiving artifacts instead."
+            mkdir -p artifacts
+            [ -d dist  ] && tar -czf artifacts/dist.tgz  dist
+            [ -d build ] && tar -czf artifacts/build.tgz build
+            [ -f package.json ] && cp package.json artifacts/
+          fi
+        '''
+      }
+      post { always { archiveArtifacts artifacts: 'artifacts/**,image.txt', allowEmptyArchive: true } }
+    }
 
-        stage('Test') {
-          steps {
-            sh '''
-              set -e
-              npm test --if-present || true
-            '''
-          }
-          post {
-            always {
-              junit testResults: 'junit*.xml, **/junit*.xml', allowEmptyResults: true
-              archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
-            }
-          }
+    stage('Test') {
+      steps { sh 'npm test --if-present || true' }
+      post {
+        always {
+          junit testResults: 'junit*.xml, **/junit*.xml', allowEmptyResults: true
+          archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
         }
       }
     }
 
-    // 3) CODE QUALITY (always enters stage; self-skip with a message)
+    // Code Quality: always enter; self-skip if not configured
     stage('Code Quality') {
       steps {
         sh '''
@@ -82,18 +71,16 @@ pipeline {
             npm i -D sonar-scanner
             npx sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
           else
-            sonar-scanner  -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
+            sonar-scanner -Dsonar.host.url="$SONAR_HOST" -Dsonar.login="$SONAR_TOKEN" || true
           fi
         '''
       }
     }
 
-    // Security (simple dependency scan)
     stage('Security') {
       steps { sh 'npm audit --audit-level=high || true' }
     }
 
-    // Deploy (test/staging)
     stage('Deploy') {
       when {
         anyOf {
@@ -117,7 +104,6 @@ pipeline {
       }
     }
 
-    // Release (tag repo)
     stage('Release') {
       when { expression { return env.GIT_URL?.trim() } }
       steps {
@@ -133,7 +119,7 @@ pipeline {
       }
     }
 
-    // 7) MONITORING (always enters stage; quick, non-blocking health check)
+    // Monitoring: always enter; quick non-blocking health check
     stage('Monitoring') {
       steps {
         sh '''
@@ -144,7 +130,6 @@ pipeline {
           fi
 
           echo "Pinging $HEALTH_URL ..."
-          # --max-time prevents long hangs that keep Blue Ocean blue forever
           if curl -fsS --max-time 10 "$HEALTH_URL" >/dev/null; then
             echo "Monitoring: Health OK"
           else
@@ -153,6 +138,7 @@ pipeline {
         '''
       }
     }
+  }
 
   post {
     success { echo '✅ Pipeline succeeded.' }
