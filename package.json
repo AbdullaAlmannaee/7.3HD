@@ -1,0 +1,11 @@
+{
+  "name": "sit223-demo-app",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node server.js",
+    "build": "echo \"(optional) build step here\"",
+    "test": "npm run test:unit",
+    "test:unit": "node ./test/sample.test.js"
+  },
+  "devDependencies": {}
+}
