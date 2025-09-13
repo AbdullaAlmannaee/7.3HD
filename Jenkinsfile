@@ -223,7 +223,11 @@ pipeline {
           set -e
           if [ -f docker-compose.yml ]; then
             command -v docker >/dev/null 2>&1 || { echo "docker not found; skipping compose"; exit 0; }
-            if [ -f image.txt ]; then IMAGE="$(cat image.txt)"; docker pull "$IMAGE" || true; fi
+            # Pull fresh image if tagged
+            if [ -f image.txt ]; then
+              IMAGE="$(cat image.txt)"
+              docker pull "$IMAGE" || true
+            fi
             docker compose down || true
             docker compose up -d --build
           elif [ -n "$DEPLOY_SSH" ]; then
@@ -232,6 +236,7 @@ pipeline {
             rsync -az --delete build/ "$DEPLOY_SSH:$DEPLOY_PATH"/ || true
           fi
 
+          # Blocking health check with retries (if HEALTH_URL provided)
           if [ -n "$HEALTH_URL" ]; then
             echo "Waiting for $HEALTH_URL to become healthy ..."
             ok=0
@@ -257,6 +262,7 @@ pipeline {
           TAG="release-${BUILD_NUMBER}"
           git config user.name "jenkins"
           git config user.email "jenkins@local"
+          # include short changelog in annotated tag
           CHANGELOG=$(git log --pretty=format:"* %s" -n 10 || true)
           git tag -fa "$TAG" -m "CI release ${BUILD_NUMBER}\n\n${CHANGELOG}"
           git push --force origin "$TAG" || true
@@ -274,14 +280,18 @@ pipeline {
             echo "Monitoring: HEALTH_URL not set -> skipping"
             exit 0
           fi
+
           echo "Pinging $HEALTH_URL ..."
           TS=$(date -u +%FT%TZ)
           HTTP_CODE=$(curl -fsS -o monitoring/health-${BUILD_NUMBER}.json -w "%{http_code}" "$HEALTH_URL" || echo "000")
           echo "$TS $HEALTH_URL -> $HTTP_CODE" | tee monitoring/ping-${BUILD_NUMBER}.txt
+          # Non-blocking by design; deploy already blocked earlier
           exit 0
         '''
       }
-      post { always { archiveArtifacts artifacts: 'monitoring/**', allowEmptyArchive: true } }
+      post {
+        always { archiveArtifacts artifacts: 'monitoring/**', allowEmptyArchive: true }
+      }
     }
   }
 
@@ -291,3 +301,4 @@ pipeline {
     always  { echo "Build #${env.BUILD_NUMBER} complete." }
   }
 }
+
