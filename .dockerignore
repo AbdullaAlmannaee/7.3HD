@@ -1,14 +1,4 @@
-.git
-.github
 node_modules
 coverage
-dist
-build
-artifacts
-security-reports
-monitoring
-Dockerfile
-docker-compose.yml
-Jenkinsfile
-*.log
-.npmrc
+reports
+.git

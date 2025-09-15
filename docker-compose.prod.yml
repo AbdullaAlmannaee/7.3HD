@@ -1,0 +1,6 @@
+services:
+  app:
+    environment:
+      NODE_ENV: "production"
+    ports:
+      - "80:8080"
