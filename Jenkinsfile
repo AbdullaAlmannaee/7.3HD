@@ -9,8 +9,7 @@ pipeline {
     SONAR_HOST  = 'https://sonarcloud.io'          
     SONAR_TOKEN = credentials('SONAR_TOKEN1')        
     DEPLOY_SSH  = "${env.DEPLOY_SSH ?: ''}"          
-    DEPLOY_PATH = "${env.DEPLOY_PATH ?: '/var/www/app'}"
-    HEALTH_URL  = "${env.HEALTH_URL ?: ''}"        
+    DEPLOY_PATH = "${env.DEPLOY_PATH ?: '/var/www/app'}"       
     REGISTRY    = "${env.REGISTRY ?: ''}"           
     IMAGE_NAME  = "${env.IMAGE_NAME ?: ''}"          
     IMAGE_TAG   = "${env.IMAGE_TAG ?: 'latest'}"
