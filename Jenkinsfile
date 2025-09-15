@@ -4,6 +4,7 @@ pipeline {
   tools   { nodejs 'NodeJS' }
 
   environment {
+    HEALTH_URL = "${env.HEALTH_URL ?: 'http://localhost:8080/health/'}"
     PATH = "/opt/homebrew/bin:/usr/local/bin:${env.PATH}"
     SONAR_HOST  = 'https://sonarcloud.io'          
     SONAR_TOKEN = credentials('SONAR_TOKEN1')        
