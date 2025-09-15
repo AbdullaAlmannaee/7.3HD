@@ -4,13 +4,14 @@ pipeline {
   tools   { nodejs 'NodeJS' }
 
   environment {
-    SONAR_HOST  = 'https://sonarcloud.io'          // optional
-    SONAR_TOKEN = credentials('SONAR_TOKEN1')        // optional
-    DEPLOY_SSH  = "${env.DEPLOY_SSH ?: ''}"          // optional
+    PATH = "/opt/homebrew/bin:/usr/local/bin:${env.PATH}"
+    SONAR_HOST  = 'https://sonarcloud.io'          
+    SONAR_TOKEN = credentials('SONAR_TOKEN1')        
+    DEPLOY_SSH  = "${env.DEPLOY_SSH ?: ''}"          
     DEPLOY_PATH = "${env.DEPLOY_PATH ?: '/var/www/app'}"
-    HEALTH_URL  = "${env.HEALTH_URL ?: ''}"          // optional
-    REGISTRY    = "${env.REGISTRY ?: ''}"            // optional
-    IMAGE_NAME  = "${env.IMAGE_NAME ?: ''}"          // optional
+    HEALTH_URL  = "${env.HEALTH_URL ?: ''}"        
+    REGISTRY    = "${env.REGISTRY ?: ''}"           
+    IMAGE_NAME  = "${env.IMAGE_NAME ?: ''}"          
     IMAGE_TAG   = "${env.IMAGE_TAG ?: 'latest'}"
   }
 
@@ -203,8 +204,8 @@ pipeline {
   }
 
   post {
-    success { echo '✅ Pipeline succeeded.' }
-    failure { echo '❌ Pipeline failed. Check the first red error above.' }
+    success { echo ' Pipeline succeeded.' }
+    failure { echo ' Pipeline failed. Check the first red error above.' }
     always  { echo "Build #${env.BUILD_NUMBER} complete." }
   }
 }
