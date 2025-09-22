@@ -5,18 +5,21 @@ pipeline {
 
   environment {
     HEALTH_URL = "${env.HEALTH_URL ?: 'http://localhost:8080/health/'}"
-    PATH = "/opt/homebrew/bin:/usr/local/bin:${env.PATH}"
-    SONAR_HOST  = 'https://sonarcloud.io'          
-    SONAR_TOKEN = credentials('SONAR_TOKEN1')        
-    DEPLOY_SSH  = "${env.DEPLOY_SSH ?: ''}"          
-    DEPLOY_PATH = "${env.DEPLOY_PATH ?: '/var/www/app'}"       
-    REGISTRY    = "${env.REGISTRY ?: ''}"           
-    IMAGE_NAME  = "${env.IMAGE_NAME ?: ''}"          
+    PATH       = "/opt/homebrew/bin:/usr/local/bin:${env.PATH}"
+    SONAR_HOST = 'https://sonarcloud.io'
+    SONAR_TOKEN = credentials('SONAR_TOKEN1')
+    DEPLOY_SSH  = "${env.DEPLOY_SSH ?: ''}"
+    DEPLOY_PATH = "${env.DEPLOY_PATH ?: '/var/www/app'}"
+    REGISTRY    = "${env.REGISTRY ?: ''}"
+    IMAGE_NAME  = "${env.IMAGE_NAME ?: ''}"
     IMAGE_TAG   = "${env.IMAGE_TAG ?: 'latest'}"
   }
 
   stages {
-    stage('Checkout') { steps { checkout scm } }
+
+    stage('Checkout') {
+      steps { checkout scm }
+    }
 
     stage('Build') {
       steps {
@@ -26,7 +29,6 @@ pipeline {
           if [ -f package-lock.json ]; then npm ci; else npm install; fi
           npm run build --if-present
 
-          # Image build is OPTIONAL; if any requirement is missing, we just archive
           if command -v docker >/dev/null 2>&1 && [ -f Dockerfile ] && [ -n "$REGISTRY" ] && [ -n "$IMAGE_NAME" ]; then
             IMAGE="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
             echo "Building Docker image $IMAGE"
@@ -42,7 +44,9 @@ pipeline {
           fi
         '''
       }
-      post { always { archiveArtifacts artifacts: 'artifacts/**,image.txt', allowEmptyArchive: true } }
+      post {
+        always { archiveArtifacts artifacts: 'artifacts/**,image.txt', allowEmptyArchive: true }
+      }
     }
 
     stage('Test') {
@@ -93,55 +97,55 @@ pipeline {
 
     stage('Security') {
       steps {
-        sh '''
-          set -e
-          mkdir -p security-reports
+        withCredentials([string(credentialsId: 'SNYK_TOKEN', variable: 'SNYK_TOKEN')]) {
+          sh '''
+            set -e
+            mkdir -p security-reports
 
-          echo "Running npm audit --json ..."
-          npm audit --json > security-reports/npm-audit.json || true
-          HIGH=$(jq '[.vulnerabilities|to_entries[]|select(.value.severity=="high" or .value.severity=="critical")]|length' security-reports/npm-audit.json 2>/dev/null || echo 0)
-          echo "High/Critical (npm): ${HIGH}"
+            echo "=== npm audit (deps) ==="
+            npm audit --json > security-reports/npm-audit.json || true
 
-          if command -v trivy >/dev/null 2>&1; then
-            echo "Trivy detected -> quick filesystem scan"
-            trivy fs --exit-code 0 --severity HIGH,CRITICAL --format json -o security-reports/trivy-fs.json . || true
+            echo "=== Trivy scans ==="
+            if command -v trivy >/dev/null 2>&1; then
+              trivy fs --exit-code 0 --severity HIGH,CRITICAL --format json -o security-reports/trivy-fs.json . || true
+              if [ -f image.txt ]; then
+                IMAGE="$(cat image.txt)"
+                trivy image --exit-code 0 --severity HIGH,CRITICAL --format json -o security-reports/trivy-image.json "$IMAGE" || true
+              fi
+            else
+              echo "Trivy not found -> skipping Trivy scans"
+            fi
+
+            echo "=== Snyk CLI ==="
+            if ! command -v snyk >/dev/null 2>&1; then
+              echo "Installing Snyk CLI..."
+              npm install -g snyk >/dev/null 2>&1 || true
+            fi
+            echo "Authenticating Snyk..."
+            snyk auth "$SNYK_TOKEN" || true
+
+            echo "=== Snyk (dependencies) ==="
+            snyk test --all-projects --severity-threshold=medium --json > security-reports/snyk-deps.json || true
+            snyk test --all-projects --severity-threshold=medium > security-reports/snyk-deps.txt || true
+
             if [ -f image.txt ]; then
               IMAGE="$(cat image.txt)"
-              trivy image --exit-code 0 --severity HIGH,CRITICAL --format json -o security-reports/trivy-image.json "$IMAGE" || true
+              echo "=== Snyk (container image) ==="
+              snyk container test "$IMAGE" --severity-threshold=medium --json > security-reports/snyk-image.json || true
+              snyk container test "$IMAGE" --severity-threshold=medium > security-reports/snyk-image.txt || true
             fi
-          else
-            echo "Trivy not found -> skipping Trivy scans"
-          fi
-        echo "=== Snyk auth ==="
-        if ! command -v snyk >/dev/null 2>&1; then
-          echo "Installing Snyk CLI..."
-          npm install -g snyk >/dev/null 2>&1 || true
-        fi
-        snyk auth "$SNYK_TOKEN" || true
 
-        echo "=== Snyk (dependencies) ==="
-        # JSON for archiving, plus readable text
-        snyk test --all-projects --severity-threshold=medium --json > security-reports/snyk-deps.json || true
-        snyk test --all-projects --severity-threshold=medium > security-reports/snyk-deps.txt || true
-
-        if [ -f image.txt ]; then
-          IMAGE="$(cat image.txt)"
-          echo "=== Snyk (container image) ==="
-          snyk container test "$IMAGE" --severity-threshold=medium --json > security-reports/snyk-image.json || true
-          snyk container test "$IMAGE" --severity-threshold=medium > security-reports/snyk-image.txt || true
-        fi
-
-        echo "=== Snyk monitor (send to dashboard) ==="
-        snyk monitor --all-projects || true
-      '''
+            echo "=== Snyk monitor (dashboard) ==="
+            snyk monitor --all-projects || true
+          '''
+        }
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'security-reports/**', allowEmptyArchive: true
+        }
+      }
     }
-  }
-  post {
-    always {
-      archiveArtifacts artifacts: 'security-reports/**', allowEmptyArchive: true
-    }
-  }
-}
 
     stage('Push Image') {
       when {
@@ -195,7 +199,6 @@ pipeline {
 
     stage('Release') {
       steps {
-        // make this stage non-blocking
         catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
           sh '''
             set +e
@@ -222,16 +225,16 @@ pipeline {
           echo "Pinging $HEALTH_URL ..."
           code=$(curl -fsS -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
           echo "Monitoring: $HEALTH_URL -> HTTP $code"
-          # explicitly do NOT fail the build
           exit 0
         '''
       }
     }
-  }
+
+  } // end stages
 
   post {
-    success { echo ' Pipeline succeeded.' }
-    failure { echo ' Pipeline failed. Check the first red error above.' }
+    success { echo 'Pipeline succeeded.' }
+    failure { echo 'Pipeline failed. Check the first red error above.' }
     always  { echo "Build #${env.BUILD_NUMBER} complete." }
   }
 }
