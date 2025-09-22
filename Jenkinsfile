@@ -112,10 +112,36 @@ pipeline {
           else
             echo "Trivy not found -> skipping Trivy scans"
           fi
-        '''
-      }
-      post { always { archiveArtifacts artifacts: 'security-reports/**', allowEmptyArchive: true } }
+        echo "=== Snyk auth ==="
+        if ! command -v snyk >/dev/null 2>&1; then
+          echo "Installing Snyk CLI..."
+          npm install -g snyk >/dev/null 2>&1 || true
+        fi
+        snyk auth "$SNYK_TOKEN" || true
+
+        echo "=== Snyk (dependencies) ==="
+        # JSON for archiving, plus readable text
+        snyk test --all-projects --severity-threshold=medium --json > security-reports/snyk-deps.json || true
+        snyk test --all-projects --severity-threshold=medium > security-reports/snyk-deps.txt || true
+
+        if [ -f image.txt ]; then
+          IMAGE="$(cat image.txt)"
+          echo "=== Snyk (container image) ==="
+          snyk container test "$IMAGE" --severity-threshold=medium --json > security-reports/snyk-image.json || true
+          snyk container test "$IMAGE" --severity-threshold=medium > security-reports/snyk-image.txt || true
+        fi
+
+        echo "=== Snyk monitor (send to dashboard) ==="
+        snyk monitor --all-projects || true
+      '''
     }
+  }
+  post {
+    always {
+      archiveArtifacts artifacts: 'security-reports/**', allowEmptyArchive: true
+    }
+  }
+}
 
     stage('Push Image') {
       when {
